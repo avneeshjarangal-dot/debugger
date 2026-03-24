@@ -1,0 +1,31 @@
+# API
+fastapi
+uvicorn[standard]
+
+# LLM
+anthropic
+langchain
+langchain-anthropic
+langgraph
+google-generativeai
+
+# Vector DB
+chromadb
+sentence-transformers
+
+# Tree-sitter parsing
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+
+# MongoDB (for log fetching)
+pymongo[srv]
+motor
+pymongo
+
+# Utilities
+python-dotenv
+pydantic
+httpx
+gitpython

@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+*.env
+
+# Python runtime
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local data stores
+debugger_chroma/
+debugger_repos/
+chroma.sqlite3
+results.json
+
+# Generated artifacts
+generated_prompts/
+fixes/
+
+# Editor / OS
+.DS_Store
+.vscode/
