@@ -29,6 +29,37 @@ def _sanitize_branch_name(issue_id: str, summary: str | None = None) -> str:
     slug = re.sub(r"-+", "-", slug)[:40] or issue_id
     return f"proctor/{issue_id}-{slug}"[:80]
 
+def _detect_default_branch(repo_root: Path) -> str:
+    try:
+        head_ref = _run_git(repo_root, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        if head_ref.startswith("origin/"):
+            return head_ref.split("/", 1)[1]
+    except Exception:
+        pass
+
+    for candidate in ("main", "master"):
+        try:
+            _run_git(repo_root, ["rev-parse", "--verify", f"origin/{candidate}"])
+            return candidate
+        except Exception:
+            continue
+
+    raise RuntimeError("Unable to determine repository default branch")
+
+
+def ensure_clean_base_checkout(repo_full_name: str) -> dict:
+    repo_root = _repo_root(repo_full_name)
+    _run_git(repo_root, ["fetch", "origin", "--prune"])
+    base_branch = _detect_default_branch(repo_root)
+    _run_git(repo_root, ["checkout", "-B", base_branch, f"origin/{base_branch}"])
+    _run_git(repo_root, ["reset", "--hard", f"origin/{base_branch}"])
+    _run_git(repo_root, ["clean", "-fd"])
+    return {
+        "ok": True,
+        "repo_root": str(repo_root),
+        "base_branch": base_branch,
+    }
+
 
 def create_branch_commit_push(repo_full_name: str, issue_id: str, summary: str | None = None) -> dict:
     repo_root = _repo_root(repo_full_name)
@@ -50,7 +81,18 @@ def create_branch_commit_push(repo_full_name: str, issue_id: str, summary: str |
             "commit", "-m", commit_message,
         ],
     )
-    _run_git(repo_root, ["push", "-u", "origin", branch_name])
+
+    push_args = ["push", "-u", "origin", branch_name]
+    if branch_name.startswith("proctor/"):
+        # Proctor owns these automation branches. If the branch already exists on the
+        # remote, replace it; otherwise allow the first push to create it normally.
+        try:
+            _run_git(repo_root, ["fetch", "origin", branch_name])
+            push_args.insert(1, "--force")
+        except RuntimeError as exc:
+            if "couldn't find remote ref" not in str(exc):
+                raise
+    _run_git(repo_root, push_args)
 
     commit_sha = _run_git(repo_root, ["rev-parse", "HEAD"])
     return {

@@ -184,6 +184,126 @@ def _replace_with_python_target(original: str, target: str, before: str, after: 
     return updated, 'python_target_match'
 
 
+
+def _extract_js_symbol_name(target: str, before: str, after: str) -> str | None:
+    import re
+
+    candidates = [str(after or ''), str(before or '')]
+    patterns = (
+        r"function\s+([A-Za-z_$][\w$]*)\s*\(",
+        r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*\(",
+        r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?\([^)]*\)\s*=>",
+    )
+    for snippet in candidates:
+        for pattern in patterns:
+            match = re.search(pattern, snippet)
+            if match:
+                return match.group(1)
+
+    raw_target = str(target or '').strip()
+    for suffix in (' function', ' method', ' handler', ' middleware', ' block'):
+        if raw_target.lower().endswith(suffix):
+            raw_target = raw_target[: -len(suffix)].strip()
+    if raw_target:
+        symbol = raw_target.split()[-1].strip()
+        return symbol or None
+    return None
+
+
+def _find_js_block(original: str, symbol_name: str) -> tuple[int, int] | None:
+    import re
+
+    patterns = (
+        re.compile(rf"(^|\n)[ \t]*function\s+{re.escape(symbol_name)}\s*\(", re.MULTILINE),
+        re.compile(rf"(^|\n)[ \t]*(?:const|let|var)\s+{re.escape(symbol_name)}\s*=\s*(?:async\s+)?function\s*\(", re.MULTILINE),
+        re.compile(rf"(^|\n)[ \t]*(?:const|let|var)\s+{re.escape(symbol_name)}\s*=\s*(?:async\s+)?\([^)]*\)\s*=>", re.MULTILINE),
+    )
+
+    match = None
+    for pattern in patterns:
+        match = pattern.search(original)
+        if match:
+            break
+    if not match:
+        return None
+
+    start_offset = match.start()
+    open_brace = original.find('{', match.end())
+    if open_brace == -1:
+        return None
+
+    depth = 0
+    in_single = False
+    in_double = False
+    in_template = False
+    escaped = False
+    i = open_brace
+    while i < len(original):
+        ch = original[i]
+        if escaped:
+            escaped = False
+        elif ch == '\\':
+            escaped = True
+        elif in_single:
+            if ch == "'":
+                in_single = False
+        elif in_double:
+            if ch == '"':
+                in_double = False
+        elif in_template:
+            if ch == '`':
+                in_template = False
+        else:
+            if ch == "'":
+                in_single = True
+            elif ch == '"':
+                in_double = True
+            elif ch == '`':
+                in_template = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end_offset = i + 1
+                    while end_offset < len(original) and original[end_offset] in '\r\n; ':
+                        end_offset += 1
+                    return start_offset, end_offset
+        i += 1
+    return None
+
+
+def _replace_with_js_target(original: str, target: str, before: str, after: str, relative_path: str) -> tuple[str, str] | None:
+    if not relative_path.endswith(('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs')):
+        return None
+    if not after.strip():
+        return None
+
+    symbol_name = _extract_js_symbol_name(target, before, after)
+    if not symbol_name:
+        return None
+
+    block_range = _find_js_block(original, symbol_name)
+    if not block_range:
+        return None
+
+    start_offset, end_offset = block_range
+    existing_block = original[start_offset:end_offset]
+
+    normalized_before = ''.join(str(before or '').split())
+    normalized_existing = ''.join(existing_block.split())
+    normalized_after = ''.join(str(after or '').split())
+    if normalized_before and normalized_before not in normalized_existing and normalized_existing == normalized_after:
+        return None
+
+    replacement = after
+    if not replacement.endswith('\n'):
+        replacement += '\n'
+
+    updated = original[:start_offset] + replacement + original[end_offset:]
+    return updated, 'js_target_match'
+
+
 def _prepare_file_update(repo_root: Path, entry: dict) -> dict:
     rel_path = str(entry.get("path") or "").strip()
     action = str(entry.get("action") or "update").strip().lower()
@@ -218,13 +338,22 @@ def _prepare_file_update(repo_root: Path, entry: dict) -> dict:
     if before in original:
         updated = original.replace(before, after, 1)
     else:
+        relative_path = target_path.relative_to(repo_root).as_posix()
         fallback = _replace_with_python_target(
             original,
             target,
             before,
             after,
-            target_path.relative_to(repo_root).as_posix(),
+            relative_path,
         )
+        if not fallback:
+            fallback = _replace_with_js_target(
+                original,
+                target,
+                before,
+                after,
+                relative_path,
+            )
         if not fallback:
             raise PatchApplicationError("before_snippet_not_found")
         updated, match_strategy = fallback

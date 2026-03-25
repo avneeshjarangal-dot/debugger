@@ -215,10 +215,31 @@ def _patch_env(req: AnalysisRequest):
 # ── Step 1: Ingest ──────────────────────────────────────────────────────────
 def run_ingest(req: AnalysisRequest) -> dict:
     from core.ingestion.indexer import index_repo, is_repo_indexed
+    from core.ingestion.repo_cloner import clone_repo, get_local_path, parse_repo_url
 
-    if not req.force_ingest and is_repo_indexed(req.github_url):
+    repo_info = parse_repo_url(req.github_url)
+    local_path = get_local_path(repo_info["full_name"])
+    indexed = is_repo_indexed(req.github_url)
+    clone_exists = os.path.exists(local_path)
+
+    if not req.force_ingest and indexed:
+        if not clone_exists:
+            logger.info("Repo index exists but local clone is missing — re-cloning repo")
+            clone_repo(req.github_url, _resolved_github_token(req), force=False)
+            return {
+                "repo": _resolved_repo_full_name(req),
+                "skipped": True,
+                "reason": "already_indexed_recloned",
+                "local_path": local_path,
+            }
+
         logger.info("Repo already indexed — skipping ingest")
-        return {"repo": _resolved_repo_full_name(req), "skipped": True, "reason": "already_indexed"}
+        return {
+            "repo": _resolved_repo_full_name(req),
+            "skipped": True,
+            "reason": "already_indexed",
+            "local_path": local_path,
+        }
 
     summary = index_repo(req.github_url, _resolved_github_token(req), force=req.force_ingest)
     return {
@@ -229,6 +250,7 @@ def run_ingest(req: AnalysisRequest) -> dict:
         "chunks_indexed":       summary["total_chunks_indexed"],
         "chunks_with_callers":  summary["chunks_with_callers"],
         "collection_name":      summary["collection_name"],
+        "local_path":           summary.get("local_path", local_path),
     }
 
 
@@ -994,11 +1016,13 @@ async def apply_local_patch(req: ApplyLocalPatchRequest):
         raise HTTPException(status_code=400, detail="Issue does not contain an applyable patch plan")
 
     from patch_applier import apply_patch_plan
+    from git_ops import ensure_clean_base_checkout
 
     repo_full_name = job.get("metadata", {}).get("repo_full_name")
     if not repo_full_name:
         raise HTTPException(status_code=500, detail="Missing repo metadata for job")
 
+    ensure_clean_base_checkout(repo_full_name)
     result = apply_patch_plan(repo_full_name, fix.get("patch_plan"))
     fix["local_apply_result"] = result
     return {
@@ -1028,7 +1052,7 @@ async def create_pr(req: CreatePullRequestRequest):
         raise HTTPException(status_code=400, detail="Issue does not contain an applyable patch plan")
 
     from patch_applier import apply_patch_plan
-    from git_ops import create_branch_commit_push
+    from git_ops import create_branch_commit_push, ensure_clean_base_checkout
     from github_pr import create_pull_request
 
     repo_full_name = job.get("metadata", {}).get("repo_full_name")
@@ -1037,6 +1061,7 @@ async def create_pr(req: CreatePullRequestRequest):
 
     local_apply_result = fix.get("local_apply_result")
     if not local_apply_result or not local_apply_result.get("ok"):
+        ensure_clean_base_checkout(repo_full_name)
         local_apply_result = apply_patch_plan(repo_full_name, fix.get("patch_plan"))
         fix["local_apply_result"] = local_apply_result
 
